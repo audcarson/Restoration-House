@@ -1,0 +1,486 @@
+{
+  "name": "Gmail to Monday.com Event-Driven Data Extraction",
+  "nodes": [
+    {
+      "parameters": {
+        "pollTimes": {
+          "item": [
+            {
+              "mode": "custom",
+              "cronExpression": "*/5 * * * *"
+            }
+          ]
+        },
+        "simple": false,
+        "filters": {
+          "q": "subject:Apricot Notification"
+        },
+        "options": {}
+      },
+      "id": "fa7e41fb-03f1-49f1-9421-be96331e98ee",
+      "name": "Gmail Trigger",
+      "type": "n8n-nodes-base.gmailTrigger",
+      "typeVersion": 1.3,
+      "position": [
+        -14848,
+        3920
+      ],
+      "credentials": {
+        "gmailOAuth2": {
+          "id": "fb9wXZn3pfCfgotR",
+          "name": "Gmail account 2"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Parse email HTML to extract EVENT: string and tracking link\n// Handles both direct emails and forwarded emails\nconst items = $input.all();\nconst output = [];\n\nfor (const item of items) {\n  let emailHtml = item.json.html || '';\n  let emailText = item.json.text || '';\n  \n  // DEBUG: Log raw input to see what we're working with\n  console.log('=== DEBUG: Raw Email Data ===');\n  console.log('Email HTML length:', emailHtml.length);\n  console.log('Email Text length:', emailText.length);\n  console.log('Email Text preview:', emailText.substring(0, 500));\n  console.log('Email HTML preview:', emailHtml.substring(0, 500));\n  \n  // Check if this is a forwarded email and extract the forwarded content\n  const forwardedMarker = '---------- Forwarded message ---------';\n  if (emailText.includes(forwardedMarker)) {\n    console.log('Detected forwarded email, extracting forwarded content');\n    const forwardedIndex = emailText.indexOf(forwardedMarker);\n    emailText = emailText.substring(forwardedIndex + forwardedMarker.length);\n    \n    // Also try to extract forwarded HTML content if possible\n    if (emailHtml.includes(forwardedMarker)) {\n      const htmlForwardedIndex = emailHtml.indexOf(forwardedMarker);\n      emailHtml = emailHtml.substring(htmlForwardedIndex + forwardedMarker.length);\n    }\n    \n    console.log('Forwarded text preview:', emailText.substring(0, 500));\n    console.log('Forwarded HTML preview:', emailHtml.substring(0, 500));\n  }\n  \n  // Extract EVENT: string from email body\n  let eventType = 'UNKNOWN';\n  const eventMatch = emailText.match(/EVENT:\\s*([^\\r\\n]+)/i);\n  console.log('Event match result:', eventMatch);\n  if (eventMatch) {\n    eventType = eventMatch[1].trim();\n  }\n  \n  // Extract the tracking link from HTML with more flexible regex\n  let trackingUrl = '';\n  // Try multiple patterns to match various URL formats\n  const linkPatterns = [\n    /href=[\\\"'](https?:\\/\\/url\\d+\\.socialsolutions\\.com\\/ls\\/click\\?[^\\\"']+)[\\\"']/i,\n    /href=[\\\"'](https?:\\/\\/[^\\\"']*socialsolutions\\.com[^\\\"']*)[\\\"']/i,\n    /href=[\\\"'](https?:\\/\\/[^\\\"']*apricot[^\\\"']*)[\\\"']/i,\n    /(https?:\\/\\/url\\d+\\.socialsolutions\\.com\\/ls\\/click\\?\\S+)/i,\n    /(https?:\\/\\/[^\\s]*socialsolutions\\.com[^\\s]*)/i\n  ];\n  \n  for (const pattern of linkPatterns) {\n    const linkMatch = emailHtml.match(pattern);\n    console.log('Link match attempt with pattern:', pattern, 'Result:', linkMatch);\n    if (linkMatch) {\n      trackingUrl = linkMatch[1];\n      console.log('Found tracking URL:', trackingUrl);\n      break;\n    }\n  }\n  \n  // If no URL found in HTML, try text content\n  if (!trackingUrl) {\n    console.log('No URL found in HTML, trying text content');\n    for (const pattern of linkPatterns) {\n      const linkMatch = emailText.match(pattern);\n      if (linkMatch) {\n        trackingUrl = linkMatch[1] || linkMatch[0];\n        console.log('Found tracking URL in text:', trackingUrl);\n        break;\n      }\n    }\n  }\n  \n  // Also extract notification timestamp and message\n  const timestampMatch = emailText.match(/(\\d{2}\\/\\d{2}\\/\\d{4}\\s+\\d{2}:\\d{2}\\s+[AP]M)/);\n  console.log('Timestamp match result:', timestampMatch);\n  const notificationTime = timestampMatch ? timestampMatch[1] : '';\n  \n  // Extract notification message\n  const messageMatch = emailText.match(/\\d{2}:\\d{2}\\s+[AP]M\\s+([^\\n]+)/);\n  console.log('Message match result:', messageMatch);\n  const notificationMessage = messageMatch ? messageMatch[1].trim() : '';\n  \n  // NEW: Extract dates from notification message and email body\n  let extractedDate = '';\n  const datePatterns = [\n    /\\b(\\d{1,2}\\/\\d{1,2}\\/\\d{4})\\b/g,  // MM/DD/YYYY or DD/MM/YYYY\n    /\\b(\\d{1,2}-\\d{1,2}-\\d{4})\\b/g,     // MM-DD-YYYY or DD-MM-YYYY\n    /\\b(\\d{4}-\\d{1,2}-\\d{1,2})\\b/g,     // YYYY-MM-DD\n    /\\b(\\d{1,2}\\.\\d{1,2}\\.\\d{4})\\b/g   // MM.DD.YYYY or DD.MM.YYYY\n  ];\n  \n  // Search in notification message first\n  const searchText = notificationMessage + ' ' + emailText;\n  for (const pattern of datePatterns) {\n    const dateMatches = searchText.match(pattern);\n    if (dateMatches && dateMatches.length > 0) {\n      // Get the first date found (excluding the notification timestamp)\n      for (const date of dateMatches) {\n        if (date !== notificationTime.split(' ')[0]) {\n          extractedDate = date;\n          console.log('Found extracted date:', extractedDate);\n          break;\n        }\n      }\n      if (extractedDate) break;\n    }\n  }\n  \n  // NEW: Extract record/person name from notification message\n  let extractedRecordName = '';\n  // Try to extract name patterns like \"John Doe\" or names before common keywords\n  const namePatterns = [\n    /(?:for|record|person|client|participant)\\s+([A-Z][a-z]+(?:\\s+[A-Z][a-z]+)+)/i,\n    /^([A-Z][a-z]+(?:\\s+[A-Z][a-z]+)+)\\s+(?:has|was|is|scheduled)/i,\n    /\\b([A-Z][a-z]+\\s+[A-Z][a-z]+)\\b/  // Generic capitalized name pattern\n  ];\n  \n  for (const pattern of namePatterns) {\n    const nameMatch = notificationMessage.match(pattern);\n    if (nameMatch) {\n      extractedRecordName = nameMatch[1].trim();\n      console.log('Found extracted record name:', extractedRecordName);\n      break;\n    }\n  }\n  \n  console.log('=== DEBUG: Extracted Values ===');\n  console.log('Event Type:', eventType);\n  console.log('Tracking URL:', trackingUrl);\n  console.log('Notification Time:', notificationTime);\n  console.log('Notification Message:', notificationMessage);\n  console.log('Extracted Date:', extractedDate);\n  console.log('Extracted Record Name:', extractedRecordName);\n  \n  output.push({\n    json: {\n      // Include raw data for debugging\n      _debug_emailTextPreview: emailText.substring(0, 1000),\n      _debug_emailHtmlPreview: emailHtml.substring(0, 1000),\n      \n      // Extracted data\n      eventType: eventType,\n      trackingUrl: trackingUrl,\n      notificationTime: notificationTime,\n      notificationMessage: notificationMessage,\n      extractedDate: extractedDate,\n      extractedRecordName: extractedRecordName,\n      originalEmailSubject: item.json.subject,\n      emailReceivedDate: item.json.date,\n      emailFrom: item.json.from?.address || item.json.from\n    }\n  });\n}\n\nreturn output;"
+      },
+      "id": "c813a6ad-dcd6-4f5c-a9d2-7cba32676ac7",
+      "name": "Parse Email and Extract Event",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -14624,
+        4016
+      ]
+    },
+    {
+      "parameters": {
+        "url": "={{ $json.trackingUrl }}",
+        "sendHeaders": true,
+        "headerParameters": {
+          "parameters": [
+            {
+              "name": "User-Agent",
+              "value": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            }
+          ]
+        },
+        "options": {
+          "redirect": {
+            "redirect": {
+              "maxRedirects": 10
+            }
+          },
+          "response": {
+            "response": {
+              "fullResponse": true
+            }
+          },
+          "timeout": 30000
+        }
+      },
+      "id": "60a667e6-24d7-49b5-876e-7a48080f0aed",
+      "name": "Follow Tracking Link",
+      "type": "n8n-nodes-base.httpRequest",
+      "typeVersion": 4.2,
+      "position": [
+        -14848,
+        4640
+      ]
+    },
+    {
+      "parameters": {
+        "jsCode": "// Merge event data from Parse Email node into clean structure\nconst items = $input.all();\nconst output = [];\n\nfor (const item of items) {\n  // Get event data from Parse Email and Extract Event node\n  const eventData = $('Parse Email and Extract Event').first().json;\n  \n  // Combine everything into a clean structure using only Parse Email data\n  output.push({\n    json: {\n      // Event metadata\n      eventType: eventData.eventType,\n      notificationTime: eventData.notificationTime,\n      notificationMessage: eventData.notificationMessage,\n      emailReceivedDate: eventData.emailReceivedDate,\n      \n      // Apricot record data from Parse Email extractions\n      recordName: eventData.extractedRecordName || '',\n      recordId: '',\n      interviewDate: eventData.extractedDate || eventData.emailReceivedDate || '',\n      status: '',\n      description: '',\n      apricotUrl: eventData.trackingUrl || '',\n      \n      // Original email metadata\n      emailSubject: eventData.originalEmailSubject,\n      emailFrom: eventData.emailFrom\n    }\n  });\n}\n\nreturn output;"
+      },
+      "id": "6e26bde0-70fb-48a6-9e71-8defc60dd520",
+      "name": "Merge All Data",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -14400,
+        4016
+      ]
+    },
+    {
+      "parameters": {
+        "rules": {
+          "values": [
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.eventType }}",
+                    "rightValue": "interview",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.eventType }}",
+                    "rightValue": "status change",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            },
+            {
+              "conditions": {
+                "options": {
+                  "caseSensitive": false,
+                  "leftValue": "",
+                  "typeValidation": "strict"
+                },
+                "conditions": [
+                  {
+                    "leftValue": "={{ $json.eventType }}",
+                    "rightValue": "new referral",
+                    "operator": {
+                      "type": "string",
+                      "operation": "contains"
+                    }
+                  }
+                ],
+                "combinator": "and"
+              }
+            }
+          ]
+        },
+        "options": {
+          "fallbackOutput": "extra",
+          "renameFallbackOutput": "Unmatched"
+        }
+      },
+      "id": "2d567225-d733-422e-8fbf-6ae37f786e67",
+      "name": "Route by Event Type",
+      "type": "n8n-nodes-base.switch",
+      "typeVersion": 3.3,
+      "position": [
+        -14176,
+        3984
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "boardItem",
+        "boardId": "YOUR_BOARD_ID",
+        "groupId": "topics",
+        "name": "={{ $json.recordName }} - Status Update",
+        "additionalFields": {
+          "columnValues": "{\"text_column_1\": \"{{ $json.notificationMessage }}\", \"status_column\": \"{{ $json.status }}\", \"link_column\": \"{{ $json.apricotUrl }}\"}"
+        }
+      },
+      "id": "49d7f1a0-a5de-4c33-93e1-88d6cb4326d6",
+      "name": "Monday - Status Change",
+      "type": "n8n-nodes-base.mondayCom",
+      "typeVersion": 1,
+      "position": [
+        -13952,
+        3920
+      ],
+      "credentials": {
+        "mondayComApi": {
+          "id": "1ZaylX9HEvUoGfhb",
+          "name": "Monday.com account"
+        }
+      },
+      "notes": "Configure with appropriate fields for status change events"
+    },
+    {
+      "parameters": {
+        "resource": "boardItem",
+        "boardId": "YOUR_BOARD_ID",
+        "groupId": "topics",
+        "name": "={{ $json.recordName }} - New Referral",
+        "additionalFields": {
+          "columnValues": "{\"text_column_1\": \"{{ $json.notificationMessage }}\", \"link_column\": \"{{ $json.apricotUrl }}\", \"date_column\": \"{{ $json.notificationTime }}\"}"
+        }
+      },
+      "id": "0a2318d1-61cd-49e1-adad-d5d8dac9e8e1",
+      "name": "Monday - New Referral",
+      "type": "n8n-nodes-base.mondayCom",
+      "typeVersion": 1,
+      "position": [
+        -13952,
+        4112
+      ],
+      "credentials": {
+        "mondayComApi": {
+          "id": "1ZaylX9HEvUoGfhb",
+          "name": "Monday.com account"
+        }
+      },
+      "notes": "Configure with appropriate fields for referral events"
+    },
+    {
+      "parameters": {
+        "resource": "boardItem",
+        "boardId": "YOUR_BOARD_ID",
+        "groupId": "topics",
+        "name": "={{ $json.eventType }} - {{ $json.recordName }}",
+        "additionalFields": {
+          "columnValues": "{\"text_column_1\": \"{{ $json.notificationMessage }}\", \"text_column_2\": \"Unmatched event type: {{ $json.eventType }}\", \"link_column\": \"{{ $json.apricotUrl }}\"}"
+        }
+      },
+      "id": "57382086-5344-4c45-904d-ad9bf14c4d17",
+      "name": "Monday - Unmatched Events",
+      "type": "n8n-nodes-base.mondayCom",
+      "typeVersion": 1,
+      "position": [
+        -13952,
+        4304
+      ],
+      "credentials": {
+        "mondayComApi": {
+          "id": "1ZaylX9HEvUoGfhb",
+          "name": "Monday.com account"
+        }
+      },
+      "notes": "Catches all unmatched event types to ensure no data is lost"
+    },
+    {
+      "parameters": {},
+      "id": "0b29578f-becb-4698-8cf5-55ada7fd3e86",
+      "name": "Manual Test Trigger",
+      "type": "n8n-nodes-base.manualTrigger",
+      "typeVersion": 1,
+      "position": [
+        -14848,
+        4112
+      ]
+    },
+    {
+      "parameters": {
+        "promptType": "define",
+        "text": "={{ $json.data }}",
+        "options": {
+          "systemMessage": "You are an AI assistant that extracts structured information from Apricot HTML pages.\n\nYour task is to:\n1. Parse the provided HTML content from an Apricot record page\n2. Extract the following information with special focus on dates:\n   - Record Name (person or entity name)\n   - Record ID (if available)\n   - Interview Date or Phone Call Date (look for any date fields related to interviews, phone calls, appointments, or scheduled events - this is the most important field)\n   - Status (current status of the record)\n   - Description or notes (any relevant details)\n3. Return the extracted data in JSON format with these exact keys: recordName, recordId, interviewDate, status, description\n\nWhen searching for the interview date:\n- Look for labels like \"Interview Date\", \"Phone Call Date\", \"Appointment Date\", \"Scheduled Date\", \"Call Date\"\n- Check for date fields in various formats (MM/DD/YYYY, DD/MM/YYYY, etc.)\n- Search thoroughly through form fields, tables, and data sections\n\nIf any field is not found in the HTML, return an empty string for that field. Be thorough in searching the HTML for relevant information."
+        }
+      },
+      "type": "@n8n/n8n-nodes-langchain.agent",
+      "typeVersion": 3,
+      "position": [
+        -14400,
+        4640
+      ],
+      "id": "4ac36089-5f75-418f-89f5-8eb9bd40a396",
+      "name": "AI Agent"
+    },
+    {
+      "parameters": {
+        "options": {}
+      },
+      "type": "@n8n/n8n-nodes-langchain.lmChatGoogleGemini",
+      "typeVersion": 1,
+      "position": [
+        -14320,
+        4864
+      ],
+      "id": "527217e7-95e0-4128-aa84-308d3366b541",
+      "name": "Google Gemini Chat Model",
+      "credentials": {
+        "googlePalmApi": {
+          "id": "ZnvuBmHeL9jAb5oh",
+          "name": "Google Gemini(PaLM) Api account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "// Debug HTML Response from Follow Tracking Link\nconst items = $input.all();\nconst output = [];\n\nfor (const item of items) {\n  const htmlData = item.json.data || '';\n  const statusCode = item.json.statusCode;\n  const headers = item.json.headers || {};\n  const finalUrl = headers.location || 'No redirect detected';\n  \n  console.log('=== DEBUG: HTML Response Analysis ===');\n  console.log('Status Code:', statusCode);\n  console.log('Final URL:', finalUrl);\n  console.log('Content-Type:', headers['content-type']);\n  console.log('HTML Length:', htmlData.length);\n  \n  // Check if it's a login page\n  const isLoginPage = htmlData.toLowerCase().includes('login') || \n                      htmlData.toLowerCase().includes('sign in') ||\n                      htmlData.toLowerCase().includes('password');\n  console.log('Appears to be login page:', isLoginPage);\n  \n  // Extract title\n  const titleMatch = htmlData.match(/<title[^>]*>([^<]+)<\\/title>/i);\n  const pageTitle = titleMatch ? titleMatch[1].trim() : 'No title found';\n  console.log('Page Title:', pageTitle);\n  \n  // Check for login forms\n  const hasLoginForm = htmlData.toLowerCase().includes('<form') && \n                       (htmlData.toLowerCase().includes('type=\"password\"') ||\n                        htmlData.toLowerCase().includes('type=\\'password\\''));\n  console.log('Has login form:', hasLoginForm);\n  \n  // Log first 2000 characters\n  console.log('=== First 2000 characters of HTML ===');\n  console.log(htmlData.substring(0, 2000));\n  console.log('=== End of HTML preview ===');\n  \n  // Pass through the data field unchanged for AI Agent\n  output.push({\n    json: {\n      data: htmlData,\n      _debug: {\n        statusCode: statusCode,\n        finalUrl: finalUrl,\n        isLoginPage: isLoginPage,\n        pageTitle: pageTitle,\n        hasLoginForm: hasLoginForm,\n        htmlLength: htmlData.length\n      }\n    }\n  });\n}\n\nreturn output;"
+      },
+      "id": "52980a4a-3b7c-494f-aba1-1be19ac45b2c",
+      "name": "Debug HTML Response",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -14624,
+        4640
+      ]
+    },
+    {
+      "parameters": {
+        "resource": "boardItem",
+        "operation": "changeColumnValue",
+        "boardId": "18390593745",
+        "itemId": "10681159616",
+        "columnId": "date",
+        "value": "={ \"date\": \"{{ $json.interviewDate }}\" }"
+      },
+      "id": "ca552e95-e321-45fe-927e-6143de8411d1",
+      "name": "Monday - New Interview",
+      "type": "n8n-nodes-base.mondayCom",
+      "typeVersion": 1,
+      "position": [
+        -13728,
+        3728
+      ],
+      "credentials": {
+        "mondayComApi": {
+          "id": "1ZaylX9HEvUoGfhb",
+          "name": "Monday.com account"
+        }
+      }
+    },
+    {
+      "parameters": {
+        "jsCode": "const items = $input.all();\nconst output = [];\n\nfor (const item of items) {\n  let formattedDate = '';\n  const rawDate = item.json.interviewDate;\n  \n  console.log('Raw interview date:', rawDate);\n  \n  if (rawDate) {\n    try {\n      // Try to parse the date - handle various formats\n      let dateObj;\n      \n      // Check if it's already in ISO format or a Date object\n      if (rawDate instanceof Date) {\n        dateObj = rawDate;\n      } else if (typeof rawDate === 'string') {\n        // Handle MM/DD/YYYY format\n        if (rawDate.match(/^\\d{1,2}\\/\\d{1,2}\\/\\d{4}$/)) {\n          const [month, day, year] = rawDate.split('/');\n          dateObj = new Date(year, month - 1, day);\n        }\n        // Handle DD-MM-YYYY format\n        else if (rawDate.match(/^\\d{1,2}-\\d{1,2}-\\d{4}$/)) {\n          const [day, month, year] = rawDate.split('-');\n          dateObj = new Date(year, month - 1, day);\n        }\n        // Handle YYYY-MM-DD format (already correct)\n        else if (rawDate.match(/^\\d{4}-\\d{1,2}-\\d{1,2}$/)) {\n          formattedDate = rawDate;\n        }\n        // Try ISO date string or other formats\n        else {\n          dateObj = new Date(rawDate);\n        }\n      }\n      \n      // Convert to YYYY-MM-DD if we have a date object\n      if (dateObj && !isNaN(dateObj.getTime())) {\n        const year = dateObj.getFullYear();\n        const month = String(dateObj.getMonth() + 1).padStart(2, '0');\n        const day = String(dateObj.getDate()).padStart(2, '0');\n        formattedDate = `${year}-${month}-${day}`;\n      }\n      \n      console.log('Formatted date:', formattedDate);\n    } catch (error) {\n      console.error('Error parsing date:', error);\n      formattedDate = '';\n    }\n  }\n  \n  // Pass through all data with formatted date\n  output.push({\n    json: {\n      ...item.json,\n      interviewDate: formattedDate,\n      _originalDate: rawDate\n    }\n  });\n}\n\nreturn output;"
+      },
+      "id": "7e7c2c02-a887-46fe-8f8d-f0ae8c629922",
+      "name": "Format Date for Monday",
+      "type": "n8n-nodes-base.code",
+      "typeVersion": 2,
+      "position": [
+        -13952,
+        3728
+      ]
+    }
+  ],
+  "pinData": {},
+  "connections": {
+    "Gmail Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse Email and Extract Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Merge All Data": {
+      "main": [
+        [
+          {
+            "node": "Route by Event Type",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Route by Event Type": {
+      "main": [
+        [
+          {
+            "node": "Format Date for Monday",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Monday - Status Change",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Monday - New Referral",
+            "type": "main",
+            "index": 0
+          }
+        ],
+        [
+          {
+            "node": "Monday - Unmatched Events",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Manual Test Trigger": {
+      "main": [
+        [
+          {
+            "node": "Parse Email and Extract Event",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Google Gemini Chat Model": {
+      "ai_languageModel": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "ai_languageModel",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Follow Tracking Link": {
+      "main": [
+        [
+          {
+            "node": "Debug HTML Response",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Debug HTML Response": {
+      "main": [
+        [
+          {
+            "node": "AI Agent",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Parse Email and Extract Event": {
+      "main": [
+        [
+          {
+            "node": "Merge All Data",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    },
+    "Format Date for Monday": {
+      "main": [
+        [
+          {
+            "node": "Monday - New Interview",
+            "type": "main",
+            "index": 0
+          }
+        ]
+      ]
+    }
+  },
+  "active": false,
+  "settings": {
+    "executionOrder": "v1"
+  },
+  "versionId": "8e4f5a9d-5c39-4359-b1f3-ccf243053ac7",
+  "meta": {
+    "templateCredsSetupCompleted": true,
+    "instanceId": "8c41c425a6c858f92b6335cbbed1cbf010b9a61e8770a304d7ff43fceb92580c"
+  },
+  "id": "gxIG6tJPLvANF86I",
+  "tags": []
+}
